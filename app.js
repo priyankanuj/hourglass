@@ -1,5 +1,12 @@
 import { DB } from '/db.js';
 
+// Register the service worker immediately, before anything else runs, so it's
+// detectable as early as possible (PWA audits like PWABuilder check shortly
+// after the page loads).
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
+
 // ---------------------------------------------------------------------------
 // Date / hour-key helpers
 // ---------------------------------------------------------------------------
@@ -632,9 +639,5 @@ async function boot() {
   renderActionsManageList();
   renderTodosManageList();
   renderCalendar();
-
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js').catch(() => {});
-  }
 }
 boot();
