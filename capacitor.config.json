@@ -1,0 +1,6 @@
+{
+  "appId": "com.hourglass.journal",
+  "appName": "Hourglass",
+  "webDir": "www",
+  "bundledWebRuntime": false
+}

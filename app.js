@@ -1,4 +1,5 @@
 import { DB } from '/db.js';
+import { isNativeApp, scheduleLocalHourlyReminders, cancelLocalReminders } from '/notifications.js';
 
 // Register the service worker immediately, before anything else runs, so it's
 // detectable as early as possible (PWA audits like PWABuilder check shortly
@@ -286,12 +287,14 @@ function renderActionsManageList() {
     row.innerHTML = `<span class="amr-name">${escapeHtml(a.name)}</span>` +
       (streak > 0 ? `<span class="amr-streak">🔥 ${streak}d streak</span>` : '') +
       `<input type="number" class="amr-points-input mono" value="${a.points}" step="1" />` +
+      `<button class="amr-timeline" aria-label="Timeline">📈</button>` +
       `<button class="amr-del" aria-label="Delete">🗑</button>`;
     row.querySelector('.amr-points-input').addEventListener('change', async (e) => {
       a.points = parseInt(e.target.value, 10) || 0;
       await DB.saveAction(a);
       await reloadAll();
     });
+    row.querySelector('.amr-timeline').addEventListener('click', () => openActionTimeline(a));
     row.querySelector('.amr-del').addEventListener('click', async () => {
       if (!confirm(`Delete "${a.name}"? Past log entries keep their history, but this action will no longer be selectable.`)) return;
       await DB.deleteAction(a.id);
@@ -314,6 +317,98 @@ document.getElementById('new-action-form').addEventListener('submit', async (e) 
   renderActionsManageList();
   renderLogView();
 });
+
+// ---------------------------------------------------------------------------
+// ACTION TIMELINE — when during the day this action tends to happen
+// ---------------------------------------------------------------------------
+const TIMELINE_DAYS = 21;
+
+function actionOccurrences(actionId, days = TIMELINE_DAYS) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const rows = [];
+  for (let i = 0; i < days; i++) {
+    const d = new Date(today);
+    d.setDate(d.getDate() - i);
+    const dayKey = dayKeyFromDate(d);
+    const hours = state.entries
+      .filter(e => hourKeyToDay(e.hourKey) === dayKey && e.actionIds && e.actionIds.includes(actionId))
+      .map(e => hourKeyToHour(e.hourKey));
+    rows.push({ date: d, dayKey, hours });
+  }
+  return rows; // index 0 = today, last = oldest
+}
+
+function timelineStats(rows) {
+  const all = rows.flatMap(r => r.hours);
+  if (all.length === 0) return null;
+  const counts = new Array(24).fill(0);
+  all.forEach(h => counts[h]++);
+  const maxCount = Math.max(...counts);
+  const commonHours = counts.map((c, h) => ({ c, h })).filter(x => x.c === maxCount).map(x => x.h);
+  const min = Math.min(...all), max = Math.max(...all);
+  return { total: all.length, commonHours, maxCount, min, max };
+}
+
+function formatHour(h) {
+  const period = h < 12 ? 'am' : 'pm';
+  let hr = h % 12; if (hr === 0) hr = 12;
+  return `${hr}${period}`;
+}
+
+function renderTimelineSVG(rows) {
+  const width = 480;
+  const leftPad = 62, rightPad = 12, topPad = 6, bottomPad = 22;
+  const rowH = 18;
+  const plotW = width - leftPad - rightPad;
+  const height = topPad + rows.length * rowH + bottomPad;
+  const hourX = h => leftPad + (h / 24) * plotW;
+
+  let svg = `<svg viewBox="0 0 ${width} ${height}" width="100%" xmlns="http://www.w3.org/2000/svg">`;
+
+  // vertical grid ticks at 0/6/12/18/24
+  [0, 6, 12, 18, 24].forEach(h => {
+    const x = hourX(h);
+    svg += `<line x1="${x}" y1="${topPad}" x2="${x}" y2="${topPad + rows.length * rowH}" class="timeline-axis-line" />`;
+    const label = h === 0 ? '12am' : h === 24 ? '12am' : h === 12 ? '12pm' : formatHour(h);
+    svg += `<text x="${x}" y="${topPad + rows.length * rowH + 15}" text-anchor="middle" class="timeline-axis-label">${label}</text>`;
+  });
+
+  rows.forEach((row, i) => {
+    const y = topPad + i * rowH + rowH / 2;
+    const label = row.date.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' });
+    svg += `<line x1="${leftPad}" y1="${y}" x2="${width - rightPad}" y2="${y}" class="timeline-row-line" />`;
+    svg += `<text x="${leftPad - 8}" y="${y + 3}" text-anchor="end" class="timeline-row-label">${label}</text>`;
+    row.hours.forEach(h => {
+      const x = hourX(h + 0.5);
+      svg += `<circle cx="${x}" cy="${y}" r="3.5" class="timeline-dot" />`;
+    });
+  });
+
+  svg += `</svg>`;
+  return svg;
+}
+
+function openActionTimeline(action) {
+  const rows = actionOccurrences(action.id);
+  const stats = timelineStats(rows);
+  let html = `<div class="timeline-summary">`;
+  if (!stats) {
+    html += `No occurrences logged in the last ${TIMELINE_DAYS} days yet — do this action a few times and a pattern will start to show here.`;
+  } else {
+    const commonLabel = stats.commonHours.map(h => `${formatHour(h)}–${formatHour((h + 1) % 24)}`).join(', ');
+    html += `Logged <strong>${stats.total}×</strong> in the last ${TIMELINE_DAYS} days. `;
+    html += `Most often around <strong>${commonLabel}</strong>`;
+    if (stats.min !== stats.max) {
+      html += `, ranging from ${formatHour(stats.min)} to ${formatHour(stats.max)}.`;
+    } else {
+      html += `.`;
+    }
+  }
+  html += `</div><div class="timeline-wrap">${renderTimelineSVG(rows)}</div>`;
+
+  openPrompt(`${action.name} — timeline`, html, () => {});
+}
 
 // ---------------------------------------------------------------------------
 // TODOS VIEW
@@ -606,13 +701,22 @@ document.getElementById('notif-save-btn').addEventListener('click', async () => 
   if (enabled) {
     status.textContent = 'Setting up reminders…';
     try {
-      await enablePushReminders(startHour, endHour);
-      status.textContent = `Reminders on, ${pad2(startHour)}:00–${pad2(endHour)}:00 daily.`;
+      if (isNativeApp()) {
+        await scheduleLocalHourlyReminders(startHour, endHour);
+        status.textContent = `Reminders on (on-device), ${pad2(startHour)}:00–${pad2(endHour)}:00 daily.`;
+      } else {
+        await enablePushReminders(startHour, endHour);
+        status.textContent = `Reminders on, ${pad2(startHour)}:00–${pad2(endHour)}:00 daily.`;
+      }
     } catch (err) {
       status.textContent = `Could not enable reminders: ${err.message}`;
     }
   } else {
-    await disablePushReminders();
+    if (isNativeApp()) {
+      await cancelLocalReminders();
+    } else {
+      await disablePushReminders();
+    }
     status.textContent = 'Reminders are off.';
   }
 });
