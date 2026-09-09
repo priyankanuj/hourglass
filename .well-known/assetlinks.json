@@ -1,1 +1,9 @@
+[{
+      "relation": ["delegate_permission/common.handle_all_urls"],
+      "target": {
+        "namespace": "android_app",
+        "package_name": "app.netlify.verdant_lokum_e4bef0.twa",
+        "sha256_cert_fingerprints": ["2D:35:C6:AA:25:94:6B:5A:1C:B7:ED:3A:2F:B6:BB:4B:30:22:5F:6D:94:4F:38:29:F4:C4:73:83:9A:EC:7E:7D"]
+      }
+    }]
 
